@@ -1,5 +1,6 @@
 /bin/
 /reports/
 /state/
+*.json
 *.test
 *.tmp

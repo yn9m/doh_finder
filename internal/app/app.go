@@ -185,6 +185,13 @@ func defaultDataDir() string {
 	if _, err := os.Stat(filepath.Join("configs", "servers.json")); err == nil {
 		return "."
 	}
+	// A fresh checkout has no generated catalog yet. Recognize the project root
+	// before falling back to the executable directory (which is temporary for go run).
+	if _, err := os.Stat("go.mod"); err == nil {
+		if _, err := os.Stat(filepath.Join("cmd", "doh-finder", "main.go")); err == nil {
+			return "."
+		}
+	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		if strings.EqualFold(filepath.Base(dir), "bin") {

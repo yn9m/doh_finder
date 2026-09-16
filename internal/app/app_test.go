@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -35,5 +37,21 @@ func TestHelpListsEachHeadlessMode(t *testing.T) {
 		if !strings.Contains(stderr.String(), flag) {
 			t.Errorf("help omits %s", flag)
 		}
+	}
+}
+
+func TestDefaultDataDirFromFreshCheckout(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(filepath.Join("cmd", "doh-finder"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("go.mod", []byte("module doh-finder\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("cmd", "doh-finder", "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultDataDir(); got != "." {
+		t.Fatalf("fresh checkout data directory = %q, want project root", got)
 	}
 }
