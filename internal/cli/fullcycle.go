@@ -78,6 +78,9 @@ func (h *Handler) BrowseOnce(ctx context.Context, priorities []int, continueAfte
 	if err == nil && state.Backup != nil {
 		_, err = fmt.Fprintf(h.output, "Backup DNS: %s (%s) | DoH: %s\n", state.Backup.Name, state.Backup.IP, state.Backup.DoHURL)
 	}
+	if err == nil {
+		err = h.dnsSettingsLocation()
+	}
 	return state, err
 }
 

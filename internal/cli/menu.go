@@ -36,7 +36,7 @@ func (h *Handler) menu(ctx context.Context, choices <-chan menuInput, timeout ti
 		if err := h.screen("DOH FINDER"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprint(h.output, "1. Update Server List\n2. Check Servers\n3. Auto Browse\n4. Full Cycle\n0. Exit\n\nSelect an option: "); err != nil {
+		if _, err := fmt.Fprint(h.output, "1. Update Server List\n2. Check Servers\n3. Auto Browse\n4. Full Cycle\n5. Current DNS Settings\n0. Exit\n\nSelect an option: "); err != nil {
 			return err
 		}
 		choice, err := nextChoice(ctx, choices)
@@ -97,8 +97,17 @@ func (h *Handler) menu(ctx context.Context, choices <-chan menuInput, timeout ti
 			if _, err := fmt.Fprintf(h.output, "Full cycle failed: %v\n", err); err != nil {
 				return err
 			}
+		case "5":
+			if err := h.screen("CURRENT DNS SETTINGS"); err != nil {
+				return err
+			}
+			if statusErr := h.Status(ctx); statusErr != nil {
+				if _, err := fmt.Fprintln(h.output, "DNS status failed:", statusErr); err != nil {
+					return err
+				}
+			}
 		default:
-			if _, err := fmt.Fprintln(h.output, "Invalid option. Enter 1, 2, 3, 4 or 0."); err != nil {
+			if _, err := fmt.Fprintln(h.output, "Invalid option. Enter 1, 2, 3, 4, 5 or 0."); err != nil {
 				return err
 			}
 		}

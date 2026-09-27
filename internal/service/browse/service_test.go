@@ -48,6 +48,7 @@ type fakeSystem struct {
 	onVerify     func()
 	confirmed    bool
 	routeChanged bool
+	overridden   bool
 }
 
 func (f *fakeSystem) Snapshot(context.Context, []ds.ServerResult) (ds.DNSSnapshot, error) {
@@ -57,6 +58,9 @@ func (f *fakeSystem) Snapshot(context.Context, []ds.ServerResult) (ds.DNSSnapsho
 func (f *fakeSystem) Apply(ctx context.Context, snap ds.DNSSnapshot, r ds.ServerResult, backup *ds.ServerResult) error {
 	if f.routeChanged {
 		return ds.ErrActiveInterfaceChanged
+	}
+	if f.overridden {
+		return ds.ErrDNSSettingsOverridden
 	}
 	if snap.InterfaceGUID != "ethernet-guid" {
 		return errors.New("changed another adapter")
@@ -88,6 +92,9 @@ func (f *fakeSystem) Verify(ctx context.Context, _ ds.DNSSnapshot, r ds.ServerRe
 	}
 	if f.routeChanged {
 		return ds.ErrActiveInterfaceChanged
+	}
+	if f.overridden {
+		return ds.ErrDNSSettingsOverridden
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -481,6 +488,41 @@ func TestRouteChangeDuringTrialOrConfirmationRestoresOriginalInterface(t *testin
 		if err != nil || state.Pending != nil || state.LastWorking != nil {
 			t.Fatal("committed a pair across interfaces")
 		}
+	}
+}
+
+func TestEffectiveDNSOverrideStopsTrialAndConfirmationWithRollback(t *testing.T) {
+	for _, during := range []string{"primary", "backup", "primary recheck", "confirmation"} {
+		t.Run(during, func(t *testing.T) {
+			s, _, f := setup()
+			ctx := context.Background()
+			if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+				t.Fatal(err)
+			}
+			checks := 0
+			f.onVerify = func() {
+				checks++
+				f.overridden = during == "primary" && checks == 1 || during == "backup" && checks == 2 || during == "primary recheck" && checks == 3
+			}
+			_, err := s.TryNext(ctx, nil)
+			if during == "confirmation" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.overridden = true
+				_, err = s.Confirm(ctx)
+			}
+			if !errors.Is(err, ds.ErrDNSSettingsOverridden) {
+				t.Fatalf("effective mismatch was swallowed: %v", err)
+			}
+			if checks > 3 || f.current != "original-primary,original-backup" {
+				t.Fatalf("continued after override or did not restore: %v", f.events)
+			}
+			state, _, err := s.Load(ctx)
+			if err != nil || state.Pending != nil || state.LastWorking != nil {
+				t.Fatal("committed ineffective settings")
+			}
+		})
 	}
 }
 

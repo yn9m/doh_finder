@@ -182,6 +182,9 @@ func (h *Handler) browse(ctx context.Context, choices <-chan menuInput, refreshe
 		if _, err := fmt.Fprintln(h.output, "Settings and position saved. These DNS settings remain active after exit."); err != nil {
 			return err
 		}
+		if err := h.dnsSettingsLocation(); err != nil {
+			return err
+		}
 		return h.pause(ctx, choices)
 	}
 }

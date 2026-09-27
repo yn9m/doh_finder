@@ -61,6 +61,7 @@ $adapter = Get-ActiveDNSAdapter
     interfaceIndex = [int]$adapter.ifIndex
     interfaceGuid = $adapter.InterfaceGuid.ToString()
     interfaceName = $adapter.Name
+    servers = @(Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $adapter.ifIndex | Select-Object -ExpandProperty ServerAddresses)
 } | ConvertTo-Json -Compress
 `)
 }
@@ -89,14 +90,57 @@ func readSnapshotScript(ctx context.Context, script string) (ds.DNSSnapshot, err
 }
 
 func (s *System) ensureActive(ctx context.Context, snapshot ds.DNSSnapshot) error {
+	_, err := s.currentAdapter(ctx, snapshot)
+	return err
+}
+
+func (s *System) currentAdapter(ctx context.Context, snapshot ds.DNSSnapshot) (ds.DNSSnapshot, error) {
 	current, err := s.active(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ds.ErrActiveInterfaceChanged, err)
+		return current, fmt.Errorf("%w: %v", ds.ErrActiveInterfaceChanged, err)
 	}
 	if current.InterfaceIndex != snapshot.InterfaceIndex || !strings.EqualFold(current.InterfaceGUID, snapshot.InterfaceGUID) {
-		return fmt.Errorf("%w: %s -> %s; restart browsing on the current connection", ds.ErrActiveInterfaceChanged, snapshot.InterfaceName, current.InterfaceName)
+		return current, fmt.Errorf("%w: %s -> %s; restart browsing on the current connection", ds.ErrActiveInterfaceChanged, snapshot.InterfaceName, current.InterfaceName)
 	}
-	return nil
+	return current, nil
+}
+
+// GetInterfaceDnsSettings reads saved settings. Also check the effective list
+// exposed by the DNS client, so an override or a delayed update cannot pass.
+func (s *System) verifyEffective(ctx context.Context, snapshot ds.DNSSnapshot, names string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var mismatch error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		current, err := s.currentAdapter(waitCtx, snapshot)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if waitCtx.Err() != nil && mismatch != nil {
+				return mismatch
+			}
+			return err
+		}
+		actual := strings.Join(current.Servers, ",")
+		if sameServers(actual, names) {
+			return nil
+		}
+		mismatch = fmt.Errorf("%w on %s (index %d): requested [%s], Windows uses [%s]; settings may be overridden by a network profile, VPN or policy", ds.ErrDNSSettingsOverridden, snapshot.InterfaceName, snapshot.InterfaceIndex, names, actual)
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return mismatch
+		case <-timer.C:
+		}
+	}
 }
 
 func (s *System) Snapshot(ctx context.Context, _ []ds.ServerResult) (ds.DNSSnapshot, error) {
@@ -139,7 +183,7 @@ func (s *System) Apply(ctx context.Context, snapshot ds.DNSSnapshot, primary ds.
 	if err := verifySettings(snapshot.InterfaceGUID, names, props); err != nil {
 		return err
 	}
-	return s.ensureActive(ctx, snapshot)
+	return s.verifyEffective(ctx, snapshot, names)
 }
 
 func verifySettings(guid, names string, props []ds.DoHSetting) error {
@@ -148,7 +192,7 @@ func verifySettings(guid, names string, props []ds.DoHSetting) error {
 		return err
 	}
 	if !sameServers(actual, names) || !reflect.DeepEqual(settings, props) {
-		return fmt.Errorf("Windows DNS/DoH readback differs from requested configuration")
+		return fmt.Errorf("Windows DNS/DoH readback differs: requested DNS [%s], DoH %+v; saved DNS [%s], DoH %+v", names, props, actual, settings)
 	}
 	return nil
 }
@@ -196,6 +240,9 @@ func (s *System) Verify(ctx context.Context, snapshot ds.DNSSnapshot, primary ds
 	if err := verifySettings(snapshot.InterfaceGUID, names, props); err != nil {
 		return err
 	}
+	if err := s.verifyEffective(ctx, snapshot, names); err != nil {
+		return err
+	}
 	for _, domain := range []string{"example.com", "www.iana.org"} {
 		addresses, err := s.resolve(ctx, snapshot.InterfaceIndex, domain)
 		if err != nil {
@@ -208,5 +255,26 @@ func (s *System) Verify(ctx context.Context, snapshot ds.DNSSnapshot, primary ds
 	if err := verifySettings(snapshot.InterfaceGUID, names, props); err != nil {
 		return err
 	}
-	return s.ensureActive(ctx, snapshot)
+	return s.verifyEffective(ctx, snapshot, names)
+}
+
+// Status is read-only and deliberately does not require the preconditions of
+// Snapshot: diagnostics must also work when a policy prevents Auto Browse.
+func (s *System) Status(ctx context.Context) (ds.DNSStatus, error) {
+	v := windows.RtlGetVersion()
+	status := ds.DNSStatus{WindowsVersion: fmt.Sprintf("%d.%d (build %d)", v.MajorVersion, v.MinorVersion, v.BuildNumber)}
+	var err error
+	status.Adapter, err = s.active(ctx)
+	if err != nil {
+		return status, err
+	}
+	status.Adapter.NameServer, status.Adapter.DoH, err = nativeRead(status.Adapter.InterfaceGUID)
+	if err != nil {
+		status.SettingsError = err.Error()
+	}
+	status.Adapter.Automatic = strings.TrimSpace(status.Adapter.NameServer) == ""
+	if err := checkDoHAllowed(); err != nil {
+		status.DoHError = err.Error()
+	}
+	return status, nil
 }

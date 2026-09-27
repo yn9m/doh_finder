@@ -25,3 +25,7 @@ func (*System) Verify(context.Context, ds.DNSSnapshot, ds.ServerResult) error { 
 func (*System) Restore(context.Context, ds.DNSSnapshot) error                 { return unsupported() }
 func Resolve(int, string) ([]string, error)                                   { return nil, unsupported() }
 func LockSession() (func(), error)                                            { return func() {}, nil }
+
+func (*System) Status(context.Context) (ds.DNSStatus, error) {
+	return ds.DNSStatus{}, unsupported()
+}

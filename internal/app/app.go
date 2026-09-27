@@ -57,6 +57,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	checkOnce := flags.Bool("check", false, "check the saved server list once without opening the menu")
 	browseOnce := flags.Bool("browse", false, "apply the first working DNS pair from the saved check report")
 	fullCycle := flags.Bool("full-cycle", false, "update, check and apply the first working DNS pair")
+	statusOnly := flags.Bool("status", false, "show effective IPv4 DNS and saved DoH settings without changing or recovering DNS")
 	prioritiesRaw := flags.String("priorities", "no-filter,no-log,dnssec", "priority order: no-filter,no-log,dnssec")
 	continueAfterLast := flags.Bool("continue", false, "continue after the last confirmed DNS pair (or a legacy single server)")
 	startOver := flags.Bool("start-over", false, "start a new ordered queue")
@@ -76,7 +77,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 2
 	}
 	modeCount := 0
-	for _, enabled := range []bool{*update, *checkOnce, *browseOnce, *fullCycle} {
+	for _, enabled := range []bool{*update, *checkOnce, *browseOnce, *fullCycle, *statusOnly} {
 		if enabled {
 			modeCount++
 		}
@@ -114,10 +115,20 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	networkLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	prober := doh.NewProber(*checkTimeout, domains, networkLogger)
 	checker := check.NewService(repository, jsonfile.NewRepository(reportPath), prober, *workers, *checkTimeout, domains)
-	browser := browse.NewService(jsonfile.NewRepository(reportPath), jsonfile.NewRepository(statePath), systemdns.NewSystem(15*time.Second))
+	system := systemdns.NewSystem(15 * time.Second)
+	browser := browse.NewService(jsonfile.NewRepository(reportPath), jsonfile.NewRepository(statePath), system)
 	clear, restoreConsole := console.Screens(stdout)
 	defer restoreConsole()
-	handler := cli.NewHandler(service, checker, logger, stdout).WithScreens(browser, clear).WithPriorities(priorities)
+	handler := cli.NewHandler(service, checker, logger, stdout).WithScreens(browser, clear).WithPriorities(priorities).WithStatus(system.Status)
+	// Read-only diagnostics must not recover a pending trial or depend on a
+	// valid catalog/session. They are also available beside a running menu.
+	if *statusOnly {
+		if err := handler.Status(ctx); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
 	release, err := systemdns.LockSession()
 	if err != nil {
 		fmt.Fprintln(stderr, err)

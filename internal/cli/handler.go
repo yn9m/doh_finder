@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+
+	"doh-finder/internal/pkg/ds"
 )
 
 type Handler struct {
@@ -15,6 +17,12 @@ type Handler struct {
 	browser           BrowseService
 	clear             func() error
 	defaultPriorities []int
+	status            func(context.Context) (ds.DNSStatus, error)
+}
+
+func (h *Handler) WithStatus(status func(context.Context) (ds.DNSStatus, error)) *Handler {
+	h.status = status
+	return h
 }
 
 func NewHandler(service CatalogService, checker CheckService, logger *slog.Logger, output io.Writer) *Handler {

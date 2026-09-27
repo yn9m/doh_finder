@@ -5,6 +5,8 @@ import "errors"
 // A changed route invalidates the entire trial, rather than just one DNS server.
 var ErrActiveInterfaceChanged = errors.New("active IPv4 interface changed or is unavailable")
 
+var ErrDNSSettingsOverridden = errors.New("Windows is not using the requested IPv4 DNS settings")
+
 // BrowseState keeps a snapshot of the queue so new checks cannot reorder a session.
 type BrowseState struct {
 	SchemaVersion    int            `json:"schemaVersion"`
@@ -36,4 +38,11 @@ type DNSSnapshot struct {
 	NameServer     string       `json:"nameServer"`
 	Servers        []string     `json:"servers"`
 	DoH            []DoHSetting `json:"doh"`
+}
+
+type DNSStatus struct {
+	Adapter        DNSSnapshot
+	WindowsVersion string
+	SettingsError  string
+	DoHError       string
 }

@@ -99,6 +99,17 @@ func TestNativeReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("adapter=%s index=%d names=%s properties=%+v", snapshot.InterfaceName, snapshot.InterfaceIndex, names, props)
+	system := NewSystem(15 * time.Second)
+	status, err := system.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Windows=%s effective DNS=%v", status.WindowsVersion, status.Adapter.Servers)
+	if names != "" {
+		if err := system.verifyEffective(context.Background(), snapshot, names); err != nil {
+			t.Fatal(err)
+		}
+	}
 	addresses, err := Resolve(snapshot.InterfaceIndex, "example.com")
 	if err != nil {
 		t.Fatal(err)
