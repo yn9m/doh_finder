@@ -45,11 +45,15 @@ func (b *browseStub) TryNext(_ context.Context, progress func(string)) (ds.Brows
 	if b.failTry {
 		return b.state, errors.New("no servers passed; restored")
 	}
+	b.state.TrialPrimary = &b.state.Queue[0]
+	b.state.TrialBackup = &ds.ServerResult{Name: "tested-backup", IP: "192.0.2.2", DoHURL: "https://backup.example/dns-query"}
+	b.state.InterfaceName = "Wi-Fi"
 	return b.state, nil
 }
 func (b *browseStub) Confirm(context.Context) (ds.BrowseState, error) {
 	b.confirms++
 	b.state.LastWorking = &b.state.Queue[0]
+	b.state.Backup = b.state.TrialBackup
 	return b.state, nil
 }
 func (b *browseStub) Recover(context.Context) error { b.recoveries++; return nil }
@@ -101,9 +105,12 @@ func TestBrowseScreensFirstRunResumeAndExplicitConfirmation(t *testing.T) {
 				if strings.Contains(frame, "DOH FINDER") && (strings.Contains(frame, "Priority order:") || strings.Contains(frame, "IPv4:")) {
 					t.Fatal("submenu content leaked into main menu")
 				}
-				if strings.Contains(frame, "SERVER WORKS") && strings.Contains(frame, "SAVED SESSION") {
+				if strings.Contains(frame, "PAIR WORKS") && strings.Contains(frame, "SAVED SESSION") {
 					t.Fatal("old prompt remained on server screen")
 				}
+			}
+			if !strings.Contains(all, "Adapter: Wi-Fi") || !strings.Contains(all, "Backup DNS: tested-backup") || !strings.Contains(all, "Only the primary is active") {
+				t.Fatal("pair/adapter details missing")
 			}
 			if b.starts == 1 {
 				want := []int{1, 2, 3}

@@ -1,15 +1,5 @@
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.State -eq 'Alive' } | ForEach-Object {
-    $iface = Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $_.InterfaceIndex
-    if ($iface.ConnectionState -eq 'Connected') {
-        [PSCustomObject]@{ Index = $_.InterfaceIndex; Metric = $_.RouteMetric + $iface.InterfaceMetric }
-    }
-} | Sort-Object Metric,Index)
-if ($routes.Count -eq 0) { throw 'No connected IPv4 default route was found.' }
-$index = $routes[0].Index
-$adapter = Get-NetAdapter -InterfaceIndex $index
+$adapter = Get-ActiveDNSAdapter
+$index = $adapter.ifIndex
 $dns = Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $index
 $nrpt = @(Get-DnsClientNrptPolicy -Effective)
 if ($nrpt.Count -ne 0) { throw 'An active DNS namespace policy (NRPT) overrides system DNS. Auto Browse cannot isolate the candidate on this connection.' }

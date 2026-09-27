@@ -37,11 +37,15 @@ func (b *cycleBrowser) ResumeAfterLast(context.Context) (ds.BrowseState, error) 
 func (b *cycleBrowser) TryNext(_ context.Context, progress func(string)) (ds.BrowseState, error) {
 	*b.events = append(*b.events, "try")
 	progress("Testing candidate")
+	b.state.TrialPrimary = &b.state.Queue[0]
+	b.state.TrialBackup = &ds.ServerResult{Name: "backup", IP: "192.0.2.2", DoHURL: "https://backup.example/dns-query"}
+	b.state.InterfaceName = "Wi-Fi"
 	return b.state, nil
 }
 func (b *cycleBrowser) Confirm(context.Context) (ds.BrowseState, error) {
 	*b.events = append(*b.events, "confirm")
 	b.state.LastWorking = &b.state.Queue[0]
+	b.state.Backup = b.state.TrialBackup
 	return b.state, nil
 }
 func (b *cycleBrowser) Recover(context.Context) error {
@@ -89,7 +93,7 @@ func TestHeadlessFullCycleOrderAndFailures(t *testing.T) {
 			if !reflect.DeepEqual(events, tc.want) {
 				t.Fatalf("events=%v, want=%v", events, tc.want)
 			}
-			if err == nil && (!strings.Contains(output.String(), "Testing candidate") || !strings.Contains(output.String(), "Active DNS:")) {
+			if err == nil && (!strings.Contains(output.String(), "Testing candidate") || !strings.Contains(output.String(), "Active DNS:") || !strings.Contains(output.String(), "Backup DNS: backup") || !strings.Contains(output.String(), "Adapter: Wi-Fi")) {
 				t.Fatal("missing headless progress or result")
 			}
 		})
@@ -110,7 +114,7 @@ func TestMenuFullCycleShowsSeparateStages(t *testing.T) {
 		t.Fatal(events)
 	}
 	joined := strings.Join(frames, "\n")
-	for _, want := range []string{"4. Full Cycle", "FULL CYCLE - UPDATE SERVER LIST", "FULL CYCLE - CHECK SERVERS", "AUTO BROWSE - PRIORITIES", "AUTO BROWSE - SERVER WORKS", "AUTO BROWSE - SAVED"} {
+	for _, want := range []string{"4. Full Cycle", "FULL CYCLE - UPDATE SERVER LIST", "FULL CYCLE - CHECK SERVERS", "AUTO BROWSE - PRIORITIES", "AUTO BROWSE - PAIR WORKS", "AUTO BROWSE - SAVED"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %s", want)
 		}

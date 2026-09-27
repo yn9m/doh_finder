@@ -39,21 +39,28 @@ func (m *memory) SaveState(ctx context.Context, state ds.BrowseState) error {
 }
 
 type fakeSystem struct {
-	store       *memory
-	current     string
-	events      []string
-	fail        map[string]bool
-	failRestore bool
-	failPair    bool
-	onVerify    func()
-	confirmed   bool
+	store        *memory
+	current      string
+	events       []string
+	fail         map[string]bool
+	failRestore  bool
+	failPair     bool
+	onVerify     func()
+	confirmed    bool
+	routeChanged bool
 }
 
 func (f *fakeSystem) Snapshot(context.Context, []ds.ServerResult) (ds.DNSSnapshot, error) {
 	f.events = append(f.events, "snapshot:"+f.current)
-	return ds.DNSSnapshot{InterfaceIndex: 14, InterfaceName: "Ethernet", NameServer: f.current, Automatic: f.current == ""}, nil
+	return ds.DNSSnapshot{InterfaceIndex: 14, InterfaceGUID: "ethernet-guid", InterfaceName: "Ethernet", NameServer: f.current, Automatic: f.current == ""}, nil
 }
 func (f *fakeSystem) Apply(ctx context.Context, snap ds.DNSSnapshot, r ds.ServerResult, backup *ds.ServerResult) error {
+	if f.routeChanged {
+		return ds.ErrActiveInterfaceChanged
+	}
+	if snap.InterfaceGUID != "ethernet-guid" {
+		return errors.New("changed another adapter")
+	}
 	state, _, err := f.store.LoadState(ctx)
 	if err != nil || state.Pending == nil {
 		return errors.New("mutation without durable recovery journal")
@@ -79,6 +86,9 @@ func (f *fakeSystem) Verify(ctx context.Context, _ ds.DNSSnapshot, r ds.ServerRe
 	if f.onVerify != nil {
 		f.onVerify()
 	}
+	if f.routeChanged {
+		return ds.ErrActiveInterfaceChanged
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -88,6 +98,9 @@ func (f *fakeSystem) Verify(ctx context.Context, _ ds.DNSSnapshot, r ds.ServerRe
 	return nil
 }
 func (f *fakeSystem) Restore(ctx context.Context, snapshot ds.DNSSnapshot) error {
+	if snapshot.InterfaceGUID != "ethernet-guid" {
+		return errors.New("restored another adapter")
+	}
 	if ctx.Err() != nil {
 		return errors.New("rollback inherited cancelled context")
 	}
@@ -105,6 +118,9 @@ func server(i int, props ds.Properties, ms int64) ds.ServerResult {
 }
 func setup() (*Service, *memory, *fakeSystem) {
 	m := &memory{report: ds.CheckReport{Results: []ds.ServerResult{server(1, ds.Properties{}, 10), server(2, ds.Properties{}, 20), server(3, ds.Properties{}, 30)}}}
+	for i := 4; i <= 6; i++ {
+		m.report.Results = append(m.report.Results, server(i, ds.Properties{}, int64(i*10)))
+	}
 	f := &fakeSystem{store: m, current: "original-primary,original-backup", fail: map[string]bool{}}
 	return NewService(m, m, f), m, f
 }
@@ -159,9 +175,12 @@ func TestBackupOnlyAfterConfirmationAndResumeAdvances(t *testing.T) {
 	if trial.LastWorking != nil || trial.Pending == nil || !trial.Verified {
 		t.Fatal("trial incorrectly committed")
 	}
+	if trial.TrialPrimary.IP != "192.0.2.1" || trial.TrialBackup.IP != "192.0.2.2" || f.current != "192.0.2.1" || trial.Current != 1 {
+		t.Fatal("did not independently find two servers while leaving primary alone")
+	}
 	f.confirmed = true
 	first, err := s.Confirm(ctx)
-	if err != nil || first.Backup != nil || first.LastWorking.IP != "192.0.2.1" {
+	if err != nil || first.Backup.IP != "192.0.2.2" || first.LastWorking.IP != "192.0.2.1" || f.current != "192.0.2.1,192.0.2.2" {
 		t.Fatalf("first confirmation: %+v %v", first, err)
 	}
 	f.confirmed = false
@@ -170,7 +189,7 @@ func TestBackupOnlyAfterConfirmationAndResumeAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if trial.Current != 1 || f.current != "192.0.2.2" || trial.LastWorking.IP != "192.0.2.1" {
+	if trial.Current != 3 || f.current != "192.0.2.3" || trial.LastWorking.IP != "192.0.2.1" {
 		t.Fatalf("resume/backup isolation failed: %+v", trial)
 	}
 	f.confirmed = true
@@ -178,7 +197,7 @@ func TestBackupOnlyAfterConfirmationAndResumeAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.LastWorking.IP != "192.0.2.2" || second.Backup.IP != "192.0.2.1" || f.current != "192.0.2.2,192.0.2.1" || second.Pending != nil {
+	if second.LastWorking.IP != "192.0.2.3" || second.Backup.IP != "192.0.2.4" || f.current != "192.0.2.3,192.0.2.4" || second.Pending != nil {
 		t.Fatal("wrong confirmed pair")
 	}
 }
@@ -187,7 +206,7 @@ func TestAllFailuresRestoreOriginalIncludingAutomaticDNS(t *testing.T) {
 	for _, original := range []string{"original-primary,original-backup", ""} {
 		s, _, f := setup()
 		f.current = original
-		for i := 1; i <= 3; i++ {
+		for i := 1; i <= 6; i++ {
 			f.fail[fmt.Sprintf("192.0.2.%d", i)] = true
 		}
 		ctx := context.Background()
@@ -198,7 +217,7 @@ func TestAllFailuresRestoreOriginalIncludingAutomaticDNS(t *testing.T) {
 		if err == nil || f.current != original {
 			t.Fatalf("did not restore original: %q %v", f.current, err)
 		}
-		if state.Current != 2 {
+		if state.Current != 5 {
 			t.Fatal("did not exhaust queue")
 		}
 		saved, _, _ := s.Load(ctx)
@@ -278,7 +297,7 @@ func TestFailedConfirmationRestoresPreviouslyWorkingPair(t *testing.T) {
 		t.Fatal("ignored pair failure")
 	}
 	state, _, _ := s.Load(ctx)
-	if state.LastWorking.IP != "192.0.2.1" || f.current != "192.0.2.1" || state.Pending != nil {
+	if state.LastWorking.IP != "192.0.2.1" || f.current != "192.0.2.1,192.0.2.2" || state.Pending != nil {
 		t.Fatal("failed confirmation changed working DNS")
 	}
 }
@@ -345,22 +364,22 @@ func TestContinueAfterLastConfirmedWithFreshAndSavedQueues(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A later failed trial must not become the continuation point.
-	f.fail["192.0.2.2"] = true
+	f.fail["192.0.2.3"] = true
 	if _, err := s.TryNext(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _, _ := s.Load(ctx)
-	if before.Current != 2 || before.LastWorking.IP != "192.0.2.1" {
+	if before.Current != 4 || before.LastWorking.IP != "192.0.2.1" {
 		t.Fatal("bad setup")
 	}
 	saved, err := s.ResumeAfterLast(ctx)
-	if err != nil || saved.Current != 0 {
+	if err != nil || saved.Current != 1 {
 		t.Fatalf("saved queue did not rewind to last success: %+v %v", saved, err)
 	}
 	// Freshly checked results may have different timings and therefore a new order.
-	m.report.Results = []ds.ServerResult{server(3, ds.Properties{}, 1), server(1, ds.Properties{}, 2), server(2, ds.Properties{}, 3)}
+	m.report.Results = []ds.ServerResult{server(3, ds.Properties{}, 1), server(2, ds.Properties{}, 2), server(1, ds.Properties{}, 3)}
 	refreshed, err := s.StartAfterLast(ctx, []int{1, 2, 3})
-	if err != nil || refreshed.Current != 1 || refreshed.Queue[1].IP != "192.0.2.1" {
+	if err != nil || refreshed.Current != 1 || refreshed.Queue[1].IP != "192.0.2.2" {
 		t.Fatalf("fresh queue position=%+v %v", refreshed, err)
 	}
 	if !reflect.DeepEqual(refreshed.Priorities, []int{1, 2, 3}) {
@@ -373,5 +392,190 @@ func TestContinueAfterLastConfirmedWithFreshAndSavedQueues(t *testing.T) {
 	}
 	if string(m.state) != priorState {
 		t.Fatal("missing anchor overwrote saved queue")
+	}
+}
+
+func TestPairSkipsFailedAndDuplicateAddresses(t *testing.T) {
+	s, m, f := setup()
+	a := server(1, ds.Properties{}, 1)
+	duplicate := a
+	duplicate.DoHURL = "https://other.example/dns-query"
+	duplicate.DNS[0].ElapsedMS = 1
+	m.report.Results = []ds.ServerResult{a, duplicate, server(2, ds.Properties{}, 2), server(3, ds.Properties{}, 3)}
+	f.fail["192.0.2.2"] = true
+	ctx := context.Background()
+	if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.TryNext(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.TrialPrimary.IP != a.IP || state.TrialBackup.IP != "192.0.2.3" {
+		t.Fatal("wrong pair")
+	}
+	want := []string{"snapshot:original-primary,original-backup", "apply:192.0.2.1", "verify:192.0.2.1", "apply:192.0.2.2", "verify:192.0.2.2", "restore:original-primary,original-backup", "apply:192.0.2.3", "verify:192.0.2.3", "apply:192.0.2.1", "verify:192.0.2.1"}
+	if !reflect.DeepEqual(f.events, want) {
+		t.Fatalf("isolation/order: %v", f.events)
+	}
+}
+
+func TestNoSecondServerRestoresOriginalAndDoesNotConfirm(t *testing.T) {
+	for _, duplicateOnly := range []bool{false, true} {
+		s, m, f := setup()
+		if duplicateOnly {
+			a := server(1, ds.Properties{}, 1)
+			b := a
+			b.DoHURL = "https://other.example/dns-query"
+			m.report.Results = []ds.ServerResult{a, b}
+		} else {
+			for i := 2; i <= 6; i++ {
+				f.fail[fmt.Sprintf("192.0.2.%d", i)] = true
+			}
+		}
+		ctx := context.Background()
+		if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.TryNext(ctx, nil); err == nil {
+			t.Fatal("accepted incomplete pair")
+		}
+		if f.current != "original-primary,original-backup" {
+			t.Fatal("did not restore original settings")
+		}
+		state, _, err := s.Load(ctx)
+		if err != nil || state.Pending != nil || state.TrialPrimary != nil || state.TrialBackup != nil || state.LastWorking != nil {
+			t.Fatalf("retained failed trial: %+v %v", state, err)
+		}
+		if _, err := s.Confirm(ctx); err == nil {
+			t.Fatal("confirmed incomplete pair")
+		}
+	}
+}
+
+func TestRouteChangeDuringTrialOrConfirmationRestoresOriginalInterface(t *testing.T) {
+	for _, duringTrial := range []bool{true, false} {
+		s, _, f := setup()
+		ctx := context.Background()
+		if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		if duringTrial {
+			f.onVerify = func() { f.routeChanged = true }
+		}
+		_, err := s.TryNext(ctx, nil)
+		if !duringTrial {
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.routeChanged = true
+			_, err = s.Confirm(ctx)
+		}
+		if !errors.Is(err, ds.ErrActiveInterfaceChanged) {
+			t.Fatalf("lost route change: %v", err)
+		}
+		if f.current != "original-primary,original-backup" {
+			t.Fatal("did not restore original interface")
+		}
+		state, _, err := s.Load(ctx)
+		if err != nil || state.Pending != nil || state.LastWorking != nil {
+			t.Fatal("committed a pair across interfaces")
+		}
+	}
+}
+
+func TestLegacySingleServerJournalCanStillBeRecovered(t *testing.T) {
+	s, m, f := setup()
+	ctx := context.Background()
+	state, err := s.Start(ctx, []int{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := f.Snapshot(ctx, nil)
+	state.Current, state.Pending, state.Verified = 0, &snapshot, true
+	if err := m.SaveState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	f.current = state.Queue[0].IP
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.current != snapshot.NameServer {
+		t.Fatal("lost legacy recovery")
+	}
+}
+
+func TestCancellationAtEveryStageRestoresOriginalPair(t *testing.T) {
+	for _, stage := range []int{1, 2, 3} {
+		t.Run(fmt.Sprint(stage), func(t *testing.T) {
+			s, _, f := setup()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			f.onVerify = func() {
+				calls++
+				if calls == stage {
+					cancel()
+				}
+			}
+			if _, err := s.TryNext(ctx, nil); !errors.Is(err, context.Canceled) {
+				t.Fatalf("stage %d: %v", stage, err)
+			}
+			if f.current != "original-primary,original-backup" {
+				t.Fatal("restored a trial instead of original settings")
+			}
+		})
+	}
+}
+
+func TestPrimaryFailureOnFinalCheckContinuesSearching(t *testing.T) {
+	s, _, f := setup()
+	ctx := context.Background()
+	if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	f.onVerify = func() {
+		calls++
+		if calls == 3 {
+			f.fail["192.0.2.1"] = true
+		}
+	}
+	state, err := s.TryNext(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.TrialPrimary.IP != "192.0.2.2" || state.TrialBackup.IP != "192.0.2.3" || f.current != "192.0.2.2" {
+		t.Fatalf("did not replace the failed primary: %+v", state)
+	}
+}
+
+func TestConfirmationSaveFailureRestoresOriginalAndRetainsJournal(t *testing.T) {
+	s, m, f := setup()
+	ctx := context.Background()
+	if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TryNext(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.confirmed = true
+	m.failSave = true
+	if _, err := s.Confirm(ctx); err == nil {
+		t.Fatal("ignored state write failure")
+	}
+	if f.current != "original-primary,original-backup" {
+		t.Fatal("new pair remained after failed commit")
+	}
+	state, _, err := s.Load(ctx)
+	if err != nil || state.Pending == nil || state.LastWorking != nil {
+		t.Fatal("lost rollback journal or confirmed failed write")
+	}
+	m.failSave = false
+	if err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

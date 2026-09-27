@@ -29,7 +29,7 @@ func (h *Handler) fullCycleMenu(ctx context.Context, choices <-chan menuInput, t
 }
 
 // BrowseOnce is used by the noninteractive commands. A successful command is
-// an explicit confirmation, so the previous confirmed DNS is enabled as backup.
+// an explicit confirmation, so the independently tested backup is enabled.
 func (h *Handler) BrowseOnce(ctx context.Context, priorities []int, continueAfterLast, refreshed bool) (state ds.BrowseState, err error) {
 	if h.browser == nil {
 		return ds.BrowseState{}, fmt.Errorf("auto browsing is not configured")
@@ -74,7 +74,7 @@ func (h *Handler) BrowseOnce(ctx context.Context, priorities []int, continueAfte
 	if err != nil {
 		return state, err
 	}
-	_, err = fmt.Fprintf(h.output, "Active DNS: %s (%s) | DoH: %s\n", state.LastWorking.Name, state.LastWorking.IP, state.LastWorking.DoHURL)
+	_, err = fmt.Fprintf(h.output, "Adapter: %s\nActive DNS: %s (%s) | DoH: %s\n", state.InterfaceName, state.LastWorking.Name, state.LastWorking.IP, state.LastWorking.DoHURL)
 	if err == nil && state.Backup != nil {
 		_, err = fmt.Fprintf(h.output, "Backup DNS: %s (%s) | DoH: %s\n", state.Backup.Name, state.Backup.IP, state.Backup.DoHURL)
 	}
@@ -82,7 +82,7 @@ func (h *Handler) BrowseOnce(ctx context.Context, priorities []int, continueAfte
 }
 
 // FullCycle runs the same update, basic check, and browse services as menu
-// options 1, 2 and 3, stopping at the first system-verified server.
+// options 1, 2 and 3, stopping at the first independently verified pair.
 func (h *Handler) FullCycle(ctx context.Context, timeout time.Duration, priorities []int, continueAfterLast bool) error {
 	updateCtx, cancel := context.WithTimeout(ctx, timeout)
 	err := h.Run(updateCtx)

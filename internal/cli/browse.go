@@ -168,13 +168,13 @@ func (h *Handler) browse(ctx context.Context, choices <-chan menuInput, refreshe
 		if err := h.screen("AUTO BROWSE - SAVED"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(h.output, "Primary DNS: %s (%s)\nDoH: %s\n", state.LastWorking.Name, state.LastWorking.IP, state.LastWorking.DoHURL); err != nil {
+		if _, err := fmt.Fprintf(h.output, "Adapter: %s\nPrimary DNS: %s (%s)\nDoH: %s\n", state.InterfaceName, state.LastWorking.Name, state.LastWorking.IP, state.LastWorking.DoHURL); err != nil {
 			return err
 		}
 		if state.Backup != nil {
 			_, err = fmt.Fprintf(h.output, "Backup DNS: %s (%s)\nDoH: %s\n", state.Backup.Name, state.Backup.IP, state.Backup.DoHURL)
 		} else {
-			_, err = fmt.Fprintln(h.output, "Backup DNS: none (no different previously confirmed server).")
+			_, err = fmt.Fprintln(h.output, "Backup DNS: none.")
 		}
 		if err != nil {
 			return err
@@ -187,13 +187,27 @@ func (h *Handler) browse(ctx context.Context, choices <-chan menuInput, refreshe
 }
 
 func (h *Handler) confirmServer(ctx context.Context, choices <-chan menuInput, state ds.BrowseState) (keep, back bool, err error) {
+	if state.TrialPrimary == nil || state.TrialBackup == nil {
+		return false, false, fmt.Errorf("no verified DNS pair to display")
+	}
 	hint := ""
 	for {
-		if err := h.screen("AUTO BROWSE - SERVER WORKS"); err != nil {
+		if err := h.screen("AUTO BROWSE - PAIR WORKS"); err != nil {
 			return false, false, err
 		}
-		r := state.Queue[state.Current]
-		if _, err := fmt.Fprintf(h.output, "Server %d/%d: %s\nIPv4: %s\nDoH: %s\nNoFilter: %t | NoLog: %t | DNSSEC: %t\n\nWindows DNS and HTTPS checks passed.\nThis is the only DNS server on the adapter during this trial.\nYou can now check websites in your browser.\n\n1. Try next server\n2. Keep this server (confirm; add previous working DNS as backup)\n0. Back (restore previous settings)\n\n%sSelect an option: ", state.Current+1, len(state.Queue), r.Name, r.IP, r.DoHURL, r.Properties.NoFilter, r.Properties.NoLog, r.Properties.DNSSEC, hint); err != nil {
+		if _, err := fmt.Fprintf(h.output, "Adapter: %s\nChecked through %d/%d\n\n", state.InterfaceName, state.Current+1, len(state.Queue)); err != nil {
+			return false, false, err
+		}
+		for i, r := range []*ds.ServerResult{state.TrialPrimary, state.TrialBackup} {
+			role := "Primary DNS"
+			if i == 1 {
+				role = "Backup DNS"
+			}
+			if _, err := fmt.Fprintf(h.output, "%s: %s\nIPv4: %s\nDoH: %s\nNoFilter: %t | NoLog: %t | DNSSEC: %t\n\n", role, r.Name, r.IP, r.DoHURL, r.Properties.NoFilter, r.Properties.NoLog, r.Properties.DNSSEC); err != nil {
+				return false, false, err
+			}
+		}
+		if _, err := fmt.Fprintf(h.output, "Both servers passed Windows DNS and HTTPS checks independently.\nOnly the primary is active until you confirm the pair.\nYou can now check websites in your browser.\n\n1. Try next pair\n2. Keep this pair (confirm; enable the tested backup)\n0. Back (restore previous settings)\n\n%sSelect an option: ", hint); err != nil {
 			return false, false, err
 		}
 		choice, err := nextChoice(ctx, choices)

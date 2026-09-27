@@ -75,7 +75,22 @@ func (s *Service) Load(ctx context.Context) (ds.BrowseState, bool, error) {
 	if state.LastWorking != nil && !usable(*state.LastWorking) || state.Backup != nil && !usable(*state.Backup) {
 		return ds.BrowseState{}, true, fmt.Errorf("invalid confirmed server in saved state")
 	}
+	for _, r := range []*ds.ServerResult{state.TrialPrimary, state.TrialBackup, state.ConfirmedThrough} {
+		if r != nil && !usable(*r) {
+			return ds.BrowseState{}, true, fmt.Errorf("invalid server in saved pair")
+		}
+	}
+	if state.TrialPrimary != nil && state.Pending == nil || state.TrialBackup != nil && (state.TrialPrimary == nil || state.TrialBackup.IP == state.TrialPrimary.IP) {
+		return ds.BrowseState{}, true, fmt.Errorf("invalid pending DNS pair")
+	}
 	return state, true, nil
+}
+
+func continuationAnchor(state ds.BrowseState) *ds.ServerResult {
+	if state.ConfirmedThrough != nil {
+		return state.ConfirmedThrough
+	}
+	return state.LastWorking // Compatible with sessions created before pair selection.
 }
 
 func property(r ds.ServerResult, priority int) bool {
@@ -102,14 +117,14 @@ func (s *Service) Start(ctx context.Context, priorities []int) (ds.BrowseState, 
 	return s.start(ctx, priorities, false)
 }
 
-// StartAfterLast rebuilds the queue from the latest report and advances past
-// the last confirmed server, identified by its explicit IPv4 and DoH URL.
+// StartAfterLast rebuilds the queue and advances past the final candidate in
+// the last confirmed pair, identified by its explicit IPv4 and DoH URL.
 func (s *Service) StartAfterLast(ctx context.Context, priorities []int) (ds.BrowseState, error) {
 	return s.start(ctx, priorities, true)
 }
 
-// ResumeAfterLast reuses the saved queue and rewinds to the last confirmed
-// server. Failed later attempts are retried on the next TryNext call.
+// ResumeAfterLast rewinds to the end of the last confirmed pair.
+// Failed later attempts are retried on the next TryNext call.
 func (s *Service) ResumeAfterLast(ctx context.Context) (ds.BrowseState, error) {
 	if err := s.Recover(ctx); err != nil {
 		return ds.BrowseState{}, err
@@ -121,8 +136,9 @@ func (s *Service) ResumeAfterLast(ctx context.Context) (ds.BrowseState, error) {
 	if !exists || state.LastWorking == nil {
 		return ds.BrowseState{}, fmt.Errorf("no previously confirmed server to continue after")
 	}
+	anchor := continuationAnchor(state)
 	for i, candidate := range state.Queue {
-		if candidate.IP == state.LastWorking.IP && candidate.DoHURL == state.LastWorking.DoHURL {
+		if candidate.IP == anchor.IP && candidate.DoHURL == anchor.DoHURL {
 			state.Current = i
 			return s.save(ctx, state)
 		}
@@ -169,11 +185,12 @@ func (s *Service) start(ctx context.Context, priorities []int, afterLast bool) (
 		}
 		return latency(a) < latency(b)
 	})
-	state := ds.BrowseState{SchemaVersion: 1, Priorities: append([]int(nil), priorities...), Queue: queue, Current: -1, LastWorking: previous.LastWorking, Backup: previous.Backup}
+	state := ds.BrowseState{SchemaVersion: 1, Priorities: append([]int(nil), priorities...), Queue: queue, Current: -1, LastWorking: previous.LastWorking, Backup: previous.Backup, ConfirmedThrough: previous.ConfirmedThrough}
 	if afterLast {
+		anchor := continuationAnchor(previous)
 		found := false
 		for i, candidate := range queue {
-			if candidate.IP == previous.LastWorking.IP && candidate.DoHURL == previous.LastWorking.DoHURL {
+			if candidate.IP == anchor.IP && candidate.DoHURL == anchor.DoHURL {
 				state.Current = i
 				found = true
 				break
@@ -199,17 +216,27 @@ func (s *Service) Recover(ctx context.Context) error {
 }
 
 func (s *Service) rollback(state ds.BrowseState) error {
+	if err := s.restoreSnapshot(*state.Pending); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	if err := s.system.Restore(ctx, *state.Pending); err != nil {
-		return fmt.Errorf("restore previous DNS failed; recovery information is saved, retry option 3 as Administrator: %w", err)
-	}
 	state.Pending, state.Verified = nil, false
+	state.TrialPrimary, state.TrialBackup = nil, nil
 	_, err := s.save(ctx, state)
 	return err
 }
 
-func (s *Service) TryNext(ctx context.Context, progress func(string)) (ds.BrowseState, error) {
+func (s *Service) restoreSnapshot(snapshot ds.DNSSnapshot) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := s.system.Restore(ctx, snapshot); err != nil {
+		return fmt.Errorf("restore previous DNS failed; recovery information is saved, retry option 3 as Administrator: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) TryNext(ctx context.Context, progress func(string)) (result ds.BrowseState, err error) {
 	if err := s.Recover(ctx); err != nil {
 		return ds.BrowseState{}, err
 	}
@@ -220,53 +247,91 @@ func (s *Service) TryNext(ctx context.Context, progress func(string)) (ds.Browse
 	if !exists {
 		return ds.BrowseState{}, fmt.Errorf("no saved queue; start a new session")
 	}
+	if state.Current+1 >= len(state.Queue) {
+		return state, fmt.Errorf("end of queue reached; previous DNS settings are active")
+	}
+	snapshot, err := s.system.Snapshot(ctx, state.Queue[state.Current+1:])
+	if err != nil {
+		return state, err
+	}
+	state.Pending, state.Verified = &snapshot, false
+	state.TrialPrimary, state.TrialBackup = nil, nil
+	state.InterfaceName = snapshot.InterfaceName
+	journalWritten := false
+	defer func() {
+		if err != nil && journalWritten {
+			err = errors.Join(err, s.rollback(state))
+		}
+	}()
 	for state.Current+1 < len(state.Queue) {
 		if err := ctx.Err(); err != nil {
 			return state, err
 		}
 		candidate := state.Queue[state.Current+1]
-		touched := []ds.ServerResult{candidate}
-		if state.LastWorking != nil {
-			touched = append(touched, *state.LastWorking)
-		}
-		snapshot, err := s.system.Snapshot(ctx, touched)
-		if err != nil {
-			return state, err
-		}
 		state.Current++
-		state.Pending = &snapshot
-		state.Verified = false
+		if state.TrialPrimary != nil && candidate.IP == state.TrialPrimary.IP {
+			continue // Windows needs two distinct DNS addresses, not two URLs for one IP.
+		}
 		// Journal is durable before the first OS setting is changed.
 		if _, err := s.save(ctx, state); err != nil {
 			return state, err
 		}
+		journalWritten = true
 		if progress != nil {
-			progress(fmt.Sprintf("Testing %d/%d: %s (%s) on %s; no backup DNS", state.Current+1, len(state.Queue), candidate.Name, candidate.IP, snapshot.InterfaceName))
-		}
-		err = s.system.Apply(ctx, snapshot, candidate, nil)
-		if err == nil {
-			err = s.system.Verify(ctx, snapshot, candidate)
-		}
-		if err != nil {
-			if rollbackErr := s.rollback(state); rollbackErr != nil {
-				return state, errors.Join(err, rollbackErr)
+			role := "primary"
+			if state.TrialPrimary != nil {
+				role = "backup"
 			}
-			state.Pending = nil
-			if ctx.Err() != nil {
-				return state, ctx.Err()
+			progress(fmt.Sprintf("Testing %s %d/%d: %s (%s) on %s; this is the only DNS during its test", role, state.Current+1, len(state.Queue), candidate.Name, candidate.IP, snapshot.InterfaceName))
+		}
+		err = s.testSingle(ctx, snapshot, candidate)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, ds.ErrActiveInterfaceChanged) {
+				return state, err
+			}
+			if rollbackErr := s.restoreSnapshot(snapshot); rollbackErr != nil {
+				journalWritten = false // Preserve the journal when restoration itself fails.
+				return state, errors.Join(err, rollbackErr)
 			}
 			if progress != nil {
 				progress("Failed: " + err.Error() + ". Previous settings restored.")
 			}
 			continue
 		}
+		if state.TrialPrimary == nil {
+			state.TrialPrimary = &candidate
+			continue
+		}
+		state.TrialBackup = &candidate
+		// Leave only the tested primary active while the user tries their sites.
+		if err := s.testSingle(ctx, snapshot, *state.TrialPrimary); err != nil {
+			if ctx.Err() != nil || errors.Is(err, ds.ErrActiveInterfaceChanged) {
+				return state, err
+			}
+			if rollbackErr := s.restoreSnapshot(snapshot); rollbackErr != nil {
+				journalWritten = false
+				return state, errors.Join(err, rollbackErr)
+			}
+			if progress != nil {
+				progress("Primary failed its final check: " + err.Error() + ". Searching for a new pair.")
+			}
+			state.TrialPrimary, state.TrialBackup = state.TrialBackup, nil
+			continue
+		}
 		state.Verified = true
 		if _, err := s.save(ctx, state); err != nil {
-			return state, errors.Join(err, s.rollback(state))
+			return state, err
 		}
 		return state, nil
 	}
-	return state, fmt.Errorf("end of queue reached; previous DNS settings are active")
+	return state, fmt.Errorf("could not find two working DNS servers with distinct IPv4 addresses; previous settings restored")
+}
+
+func (s *Service) testSingle(ctx context.Context, snapshot ds.DNSSnapshot, candidate ds.ServerResult) error {
+	if err := s.system.Apply(ctx, snapshot, candidate, nil); err != nil {
+		return err
+	}
+	return s.system.Verify(ctx, snapshot, candidate)
 }
 
 // Confirm is the only operation that enables a backup and updates LastWorking.
@@ -275,20 +340,19 @@ func (s *Service) Confirm(ctx context.Context) (ds.BrowseState, error) {
 	if err != nil {
 		return state, err
 	}
-	if !exists || !state.Verified || state.Pending == nil {
-		return state, fmt.Errorf("no verified server awaiting confirmation")
+	if !exists || !state.Verified || state.Pending == nil || state.TrialPrimary == nil || state.TrialBackup == nil {
+		return state, fmt.Errorf("no independently verified DNS pair awaiting confirmation")
 	}
-	primary := state.Queue[state.Current]
-	backup := state.LastWorking
-	if backup != nil && backup.IP == primary.IP {
-		backup = nil
-	}
+	primary := *state.TrialPrimary
+	backup := state.TrialBackup
 	if err := s.system.Apply(ctx, *state.Pending, primary, backup); err != nil {
 		return state, errors.Join(err, s.rollback(state))
 	}
 	committed := state
 	committed.LastWorking, committed.Backup = &primary, backup
+	committed.ConfirmedThrough = &state.Queue[state.Current]
 	committed.Pending, committed.Verified = nil, false
+	committed.TrialPrimary, committed.TrialBackup = nil, nil
 	if _, err := s.save(ctx, committed); err != nil {
 		return state, errors.Join(err, s.rollback(state))
 	}

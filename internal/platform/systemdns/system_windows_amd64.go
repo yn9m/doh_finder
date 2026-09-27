@@ -25,9 +25,17 @@ import (
 //go:embed inspect.ps1
 var inspectScript string
 
-type System struct{ timeout time.Duration }
+//go:embed active-interface.ps1
+var activeInterfaceScript string
 
-func NewSystem(timeout time.Duration) *System { return &System{timeout: timeout} }
+type System struct {
+	timeout time.Duration
+	active  func(context.Context) (ds.DNSSnapshot, error)
+}
+
+func NewSystem(timeout time.Duration) *System {
+	return &System{timeout: timeout, active: activeInterface}
+}
 
 func LockSession() (func(), error) {
 	name, _ := windows.UTF16PtrFromString(`Global\doh-finder-auto-browse`)
@@ -43,10 +51,25 @@ func LockSession() (func(), error) {
 }
 
 func inspect(ctx context.Context) (ds.DNSSnapshot, error) {
+	return readSnapshotScript(ctx, activeInterfaceScript+"\n"+inspectScript)
+}
+
+func activeInterface(ctx context.Context) (ds.DNSSnapshot, error) {
+	return readSnapshotScript(ctx, activeInterfaceScript+`
+$adapter = Get-ActiveDNSAdapter
+[PSCustomObject]@{
+    interfaceIndex = [int]$adapter.ifIndex
+    interfaceGuid = $adapter.InterfaceGuid.ToString()
+    interfaceName = $adapter.Name
+} | ConvertTo-Json -Compress
+`)
+}
+
+func readSnapshotScript(ctx context.Context, script string) (ds.DNSSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	var encoded bytes.Buffer
-	for _, v := range utf16.Encode([]rune(inspectScript)) {
+	for _, v := range utf16.Encode([]rune(script)) {
 		_ = binary.Write(&encoded, binary.LittleEndian, v)
 	}
 	shell := os.Getenv("SystemRoot") + `\System32\WindowsPowerShell\v1.0\powershell.exe`
@@ -63,6 +86,17 @@ func inspect(ctx context.Context) (ds.DNSSnapshot, error) {
 		return snapshot, err
 	}
 	return snapshot, nil
+}
+
+func (s *System) ensureActive(ctx context.Context, snapshot ds.DNSSnapshot) error {
+	current, err := s.active(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ds.ErrActiveInterfaceChanged, err)
+	}
+	if current.InterfaceIndex != snapshot.InterfaceIndex || !strings.EqualFold(current.InterfaceGUID, snapshot.InterfaceGUID) {
+		return fmt.Errorf("%w: %s -> %s; restart browsing on the current connection", ds.ErrActiveInterfaceChanged, snapshot.InterfaceName, current.InterfaceName)
+	}
+	return nil
 }
 
 func (s *System) Snapshot(ctx context.Context, _ []ds.ServerResult) (ds.DNSSnapshot, error) {
@@ -95,11 +129,17 @@ func (s *System) Apply(ctx context.Context, snapshot ds.DNSSnapshot, primary ds.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := s.ensureActive(ctx, snapshot); err != nil {
+		return err
+	}
 	names, props := desired(primary, backup)
 	if err := nativeWrite(snapshot.InterfaceGUID, names, props); err != nil {
 		return err
 	}
-	return verifySettings(snapshot.InterfaceGUID, names, props)
+	if err := verifySettings(snapshot.InterfaceGUID, names, props); err != nil {
+		return err
+	}
+	return s.ensureActive(ctx, snapshot)
 }
 
 func verifySettings(guid, names string, props []ds.DoHSetting) error {
@@ -146,6 +186,9 @@ func (s *System) resolve(ctx context.Context, index int, domain string) ([]strin
 }
 
 func (s *System) Verify(ctx context.Context, snapshot ds.DNSSnapshot, primary ds.ServerResult) error {
+	if err := s.ensureActive(ctx, snapshot); err != nil {
+		return err
+	}
 	if err := checkDoHAllowed(); err != nil {
 		return err
 	}
@@ -162,5 +205,8 @@ func (s *System) Verify(ctx context.Context, snapshot ds.DNSSnapshot, primary ds
 			return err
 		}
 	}
-	return verifySettings(snapshot.InterfaceGUID, names, props)
+	if err := verifySettings(snapshot.InterfaceGUID, names, props); err != nil {
+		return err
+	}
+	return s.ensureActive(ctx, snapshot)
 }
