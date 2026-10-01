@@ -7,6 +7,8 @@ var ErrActiveInterfaceChanged = errors.New("active IPv4 interface changed or is 
 
 var ErrDNSSettingsOverridden = errors.New("Windows is not using the requested IPv4 DNS settings")
 
+var ErrDNSPolicyConflict = errors.New("NRPT redirects the DNS verification queries")
+
 // BrowseState keeps a snapshot of the queue so new checks cannot reorder a session.
 type BrowseState struct {
 	SchemaVersion    int            `json:"schemaVersion"`
@@ -38,6 +40,15 @@ type DNSSnapshot struct {
 	NameServer     string       `json:"nameServer"`
 	Servers        []string     `json:"servers"`
 	DoH            []DoHSetting `json:"doh"`
+	NRPT           []NRPTPolicy `json:"nrpt,omitempty"`
+}
+
+type NRPTPolicy struct {
+	Namespace                string   `json:"namespace"`
+	NameServers              []string `json:"nameServers"`
+	DirectAccessEnabled      bool     `json:"directAccessEnabled"`
+	DirectAccessDNSServers   []string `json:"directAccessDnsServers"`
+	DNSSECValidationRequired bool     `json:"dnssecValidationRequired"`
 }
 
 type DNSStatus struct {
@@ -45,4 +56,5 @@ type DNSStatus struct {
 	WindowsVersion string
 	SettingsError  string
 	DoHError       string
+	PolicyError    string
 }

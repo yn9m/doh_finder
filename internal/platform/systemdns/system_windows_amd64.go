@@ -51,7 +51,11 @@ func LockSession() (func(), error) {
 }
 
 func inspect(ctx context.Context) (ds.DNSSnapshot, error) {
-	return readSnapshotScript(ctx, activeInterfaceScript+"\n"+inspectScript)
+	snapshot, err := readSnapshotScript(ctx, activeInterfaceScript+"\n"+inspectScript)
+	if err == nil {
+		err = checkNRPT(snapshot.NRPT, verificationDomains)
+	}
+	return snapshot, err
 }
 
 func activeInterface(ctx context.Context) (ds.DNSSnapshot, error) {
@@ -62,7 +66,8 @@ $adapter = Get-ActiveDNSAdapter
     interfaceGuid = $adapter.InterfaceGuid.ToString()
     interfaceName = $adapter.Name
     servers = @(Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $adapter.ifIndex | Select-Object -ExpandProperty ServerAddresses)
-} | ConvertTo-Json -Compress
+    nrpt = @(Get-EffectiveDNSPolicies)
+} | ConvertTo-Json -Compress -Depth 5
 `)
 }
 
@@ -70,6 +75,9 @@ func readSnapshotScript(ctx context.Context, script string) (ds.DNSSnapshot, err
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	var encoded bytes.Buffer
+	// Console.Error bypasses PowerShell's CLIXML serialization under
+	// -EncodedCommand. Keep only the exception message for the console UI.
+	script = "$ErrorActionPreference = 'Stop'\ntry {\n" + script + "\n} catch {\n[Console]::Error.WriteLine($_.Exception.Message)\nexit 1\n}\n"
 	for _, v := range utf16.Encode([]rune(script)) {
 		_ = binary.Write(&encoded, binary.LittleEndian, v)
 	}
@@ -80,7 +88,10 @@ func readSnapshotScript(ctx context.Context, script string) (ds.DNSSnapshot, err
 	cmd.Stderr = &stderr
 	body, err := cmd.Output()
 	if err != nil {
-		return ds.DNSSnapshot{}, fmt.Errorf("inspect IPv4 adapter: %w: %s", err, stderr.String())
+		if ctx.Err() != nil {
+			return ds.DNSSnapshot{}, ctx.Err()
+		}
+		return ds.DNSSnapshot{}, fmt.Errorf("inspect IPv4 adapter: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	var snapshot ds.DNSSnapshot
 	if err := json.Unmarshal(bytes.TrimPrefix(body, []byte{0xef, 0xbb, 0xbf}), &snapshot); err != nil {
@@ -101,6 +112,9 @@ func (s *System) currentAdapter(ctx context.Context, snapshot ds.DNSSnapshot) (d
 	}
 	if current.InterfaceIndex != snapshot.InterfaceIndex || !strings.EqualFold(current.InterfaceGUID, snapshot.InterfaceGUID) {
 		return current, fmt.Errorf("%w: %s -> %s; restart browsing on the current connection", ds.ErrActiveInterfaceChanged, snapshot.InterfaceName, current.InterfaceName)
+	}
+	if err := checkNRPT(current.NRPT, verificationDomains); err != nil {
+		return current, err
 	}
 	return current, nil
 }
@@ -243,7 +257,7 @@ func (s *System) Verify(ctx context.Context, snapshot ds.DNSSnapshot, primary ds
 	if err := s.verifyEffective(ctx, snapshot, names); err != nil {
 		return err
 	}
-	for _, domain := range []string{"example.com", "www.iana.org"} {
+	for _, domain := range verificationDomains {
 		addresses, err := s.resolve(ctx, snapshot.InterfaceIndex, domain)
 		if err != nil {
 			return err
@@ -275,6 +289,9 @@ func (s *System) Status(ctx context.Context) (ds.DNSStatus, error) {
 	status.Adapter.Automatic = strings.TrimSpace(status.Adapter.NameServer) == ""
 	if err := checkDoHAllowed(); err != nil {
 		status.DoHError = err.Error()
+	}
+	if err := checkNRPT(status.Adapter.NRPT, verificationDomains); err != nil {
+		status.PolicyError = err.Error()
 	}
 	return status, nil
 }

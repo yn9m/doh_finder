@@ -48,6 +48,25 @@ func (h *Handler) Status(ctx context.Context) error {
 			return err
 		}
 	}
+	if len(a.NRPT) == 0 {
+		if _, err := fmt.Fprintln(h.output, "NRPT: no effective DNS namespace rules."); err != nil {
+			return err
+		}
+	}
+	for _, rule := range a.NRPT {
+		names := strings.Join(rule.NameServers, ", ")
+		if names == "" {
+			names = "adapter DNS (no override)"
+		}
+		if _, err := fmt.Fprintf(h.output, "NRPT namespace %q: %s; DirectAccess enabled: %t; DirectAccess DNS: %s; DNSSEC required: %t\n", rule.Namespace, names, rule.DirectAccessEnabled, strings.Join(rule.DirectAccessDNSServers, ", "), rule.DNSSECValidationRequired); err != nil {
+			return err
+		}
+	}
+	if status.PolicyError != "" {
+		if _, err := fmt.Fprintln(h.output, "Auto Browse blocked:", status.PolicyError); err != nil {
+			return err
+		}
+	}
 	if err := h.dnsSettingsLocation(); err != nil {
 		return err
 	}

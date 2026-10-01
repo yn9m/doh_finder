@@ -286,7 +286,7 @@ func (s *Service) TryNext(ctx context.Context, progress func(string)) (result ds
 		}
 		err = s.testSingle(ctx, snapshot, candidate)
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, ds.ErrActiveInterfaceChanged) || errors.Is(err, ds.ErrDNSSettingsOverridden) {
+			if ctx.Err() != nil || errors.Is(err, ds.ErrActiveInterfaceChanged) || errors.Is(err, ds.ErrDNSSettingsOverridden) || errors.Is(err, ds.ErrDNSPolicyConflict) {
 				return state, err
 			}
 			if rollbackErr := s.restoreSnapshot(snapshot); rollbackErr != nil {
@@ -305,7 +305,7 @@ func (s *Service) TryNext(ctx context.Context, progress func(string)) (result ds
 		state.TrialBackup = &candidate
 		// Leave only the tested primary active while the user tries their sites.
 		if err := s.testSingle(ctx, snapshot, *state.TrialPrimary); err != nil {
-			if ctx.Err() != nil || errors.Is(err, ds.ErrActiveInterfaceChanged) || errors.Is(err, ds.ErrDNSSettingsOverridden) {
+			if ctx.Err() != nil || errors.Is(err, ds.ErrActiveInterfaceChanged) || errors.Is(err, ds.ErrDNSSettingsOverridden) || errors.Is(err, ds.ErrDNSPolicyConflict) {
 				return state, err
 			}
 			if rollbackErr := s.restoreSnapshot(snapshot); rollbackErr != nil {

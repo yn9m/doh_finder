@@ -44,3 +44,21 @@ func TestStatusRetainsEffectiveDNSWhenDoHReadFails(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusShowsNRPTConflictAndItsResolver(t *testing.T) {
+	var out bytes.Buffer
+	h := NewHandler(nil, nil, slog.Default(), &out).WithStatus(func(context.Context) (ds.DNSStatus, error) {
+		return ds.DNSStatus{
+			Adapter:     ds.DNSSnapshot{NRPT: []ds.NRPTPolicy{{Namespace: ".", NameServers: []string{"192.0.2.53"}}}},
+			PolicyError: "example.com is redirected by NRPT",
+		}, nil
+	})
+	if err := h.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`NRPT namespace "."`, "192.0.2.53", "Auto Browse blocked:", "example.com"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q in %s", want, out.String())
+		}
+	}
+}

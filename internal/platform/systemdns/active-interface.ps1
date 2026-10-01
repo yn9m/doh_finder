@@ -2,6 +2,23 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
+function Get-EffectiveDNSPolicies {
+    Get-DnsClientNrptPolicy -Effective | ForEach-Object {
+        $rule = $_
+        foreach ($namespace in @($rule.Namespace)) {
+            if (-not [string]::IsNullOrWhiteSpace($namespace)) {
+                [PSCustomObject]@{
+                    namespace = [string]$namespace
+                    nameServers = @($rule.NameServers | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    directAccessEnabled = [bool]$rule.DirectAccessEnabled
+                    directAccessDnsServers = @($rule.DirectAccessDnsServers | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    dnssecValidationRequired = [bool]$rule.DnsSecValidationRequired
+                }
+            }
+        }
+    }
+}
+
 function Get-ActiveDNSAdapter {
     $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -eq 'Up' })
     $interfaces = @(Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.ConnectionState -eq 'Connected' })

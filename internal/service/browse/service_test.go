@@ -39,16 +39,17 @@ func (m *memory) SaveState(ctx context.Context, state ds.BrowseState) error {
 }
 
 type fakeSystem struct {
-	store        *memory
-	current      string
-	events       []string
-	fail         map[string]bool
-	failRestore  bool
-	failPair     bool
-	onVerify     func()
-	confirmed    bool
-	routeChanged bool
-	overridden   bool
+	store          *memory
+	current        string
+	events         []string
+	fail           map[string]bool
+	failRestore    bool
+	failPair       bool
+	onVerify       func()
+	confirmed      bool
+	routeChanged   bool
+	overridden     bool
+	policyConflict bool
 }
 
 func (f *fakeSystem) Snapshot(context.Context, []ds.ServerResult) (ds.DNSSnapshot, error) {
@@ -61,6 +62,9 @@ func (f *fakeSystem) Apply(ctx context.Context, snap ds.DNSSnapshot, r ds.Server
 	}
 	if f.overridden {
 		return ds.ErrDNSSettingsOverridden
+	}
+	if f.policyConflict {
+		return ds.ErrDNSPolicyConflict
 	}
 	if snap.InterfaceGUID != "ethernet-guid" {
 		return errors.New("changed another adapter")
@@ -95,6 +99,9 @@ func (f *fakeSystem) Verify(ctx context.Context, _ ds.DNSSnapshot, r ds.ServerRe
 	}
 	if f.overridden {
 		return ds.ErrDNSSettingsOverridden
+	}
+	if f.policyConflict {
+		return ds.ErrDNSPolicyConflict
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -523,6 +530,34 @@ func TestEffectiveDNSOverrideStopsTrialAndConfirmationWithRollback(t *testing.T)
 				t.Fatal("committed ineffective settings")
 			}
 		})
+	}
+}
+
+func TestNewNRPTOverrideAbortsTrialOrConfirmationAndRestoresDNS(t *testing.T) {
+	for _, duringTrial := range []bool{true, false} {
+		s, _, f := setup()
+		ctx := context.Background()
+		if _, err := s.Start(ctx, []int{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		if duringTrial {
+			f.onVerify = func() { f.policyConflict = true }
+		}
+		_, err := s.TryNext(ctx, nil)
+		if !duringTrial {
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.policyConflict = true
+			_, err = s.Confirm(ctx)
+		}
+		if !errors.Is(err, ds.ErrDNSPolicyConflict) || f.current != "original-primary,original-backup" {
+			t.Fatalf("NRPT override did not stop and restore: err=%v events=%v", err, f.events)
+		}
+		state, _, err := s.Load(ctx)
+		if err != nil || state.Pending != nil || state.LastWorking != nil {
+			t.Fatal("retained or confirmed a trial affected by NRPT")
+		}
 	}
 }
 
